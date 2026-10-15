@@ -17,6 +17,14 @@ def load_json(filepath, default):
             return json.load(f)
     return default
 
+def collect_unresolved(dream_state, story_history):
+    unresolved = set(dream_state.get("unresolved_elements", []))
+    mysteries = set(dream_state.get("known_mysteries", []))
+    for event in story_history:
+        if "unresolved_elements" in event:
+            unresolved.update(event.get("unresolved_elements", []))
+    return list(unresolved), list(mysteries)
+
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 EVENT_SCHEMA = {
@@ -47,15 +55,18 @@ EVENT_SCHEMA = {
     ]
 }
 
-def generate_event(dream_state: dict, story_history: list, chosen_action: str, event_id: str) -> dict:
+def generate_event(dream_state, story_history, chosen_action, event_id, unresolved, mysteries):
     history_text = "\n".join(
         f"- {e['event_id']}: {e['description']} (clue: {e['clue']})"
         for e in story_history
-    ) if story_history else "None yet — this is the first event."
+    ) if story_history else "None yet, this is the first event."
 
-    interaction = client.interactions.create(
-        model="gemini-3.6-flash",
-        input=f"""You are the AI Story Director for a dream-continuation game set
+    if chosen_action:
+        action_text = f'The player just chose: "{chosen_action}"'
+    else:
+        action_text = "This is the opening event. Continue directly from the dream's final_moment."
+
+    prompt_text = f"""You are the AI Story Director for a dream-continuation game set
 in Indian folklore. Ground descriptions, objects, and atmosphere in Indian
 haveli architecture (courtyards, jharokha balconies, jaali lattice screens,
 carved wooden doors) and Indian folklore entities (e.g. Vetal, Churail,
@@ -67,11 +78,14 @@ Dream State:
 Story so far:
 {history_text}
 
-The player just chose: "{chosen_action}"
+Still unresolved from earlier (weave these back in over time, don't ignore them): {unresolved}
+Known mysteries not yet solved: {mysteries}
 
-Generate the NEXT Event that results from this choice. It must stay
-logically connected to everything above, resolve or build on the chosen
-action specifically, and not repeat a clue or event already given.
+{action_text}
+
+Generate the NEXT Event that results from this. It must stay
+logically connected to everything above, build on the action specifically,
+and not repeat a clue or event already given.
 
 IMPORTANT: The "location" field must be copied EXACTLY from the Dream
 State's location_name field, unless the story has clearly moved the
@@ -79,10 +93,14 @@ player to a different named location already established in the
 story so far.
 
 IMPORTANT: "next_possible_events" must be simple, human-readable action
-labels in snake_case (e.g. "follow_footprints", "inspect_door") — never
+labels in snake_case (e.g. "follow_footprints", "inspect_door"), never
 numeric IDs.
 
-event_id to use: {event_id}""",
+event_id to use: {event_id}"""
+
+    interaction = client.interactions.create(
+        model="gemini-3.6-flash",
+        input=prompt_text,
         response_format={
             "type": "text",
             "mime_type": "application/json",
@@ -121,9 +139,11 @@ if __name__ == "__main__":
             exit()
 
     while True:
+        unresolved, mysteries = collect_unresolved(dream_state, story_history)
         event = generate_event(
             dream_state, story_history, chosen_action,
-            event_id=f"evt_{event_count:04d}"
+            event_id=f"evt_{event_count:04d}",
+            unresolved=unresolved, mysteries=mysteries
         )
         print(json.dumps(event, indent=2))
         story_history.append(event)
